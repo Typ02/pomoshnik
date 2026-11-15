@@ -37,7 +37,7 @@ object Learner {
 
     private fun round5(x: Long): Long = Math.round(x / 5.0) * 5L
 
-    private fun dismissed(ctx: Context): Set<String> =
+    fun dismissed(ctx: Context): Set<String> =
         Logic.prefs(ctx).getStringSet("dismissed", null) ?: emptySet()
 
     fun dismiss(ctx: Context, id: String) {

@@ -31,7 +31,10 @@ data class Ev(
     val extra: Long,
 )
 
-class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "pomoshnik.db", null, 1) {
+/** Те, що помічник пам'ятає: kind = fact (a = текст) або rule (a = фраза, b = що вона означає). */
+class Fact(val id: Long, val kind: String, val a: String, val b: String, val at: Long)
+
+class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "pomoshnik.db", null, 2) {
 
     companion object {
         @Volatile
@@ -56,9 +59,43 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "pomoshnik.db
                 "title TEXT, type TEXT, at INTEGER, due_at INTEGER, extra INTEGER)"
         )
         db.execSQL("CREATE INDEX ev_at ON events(at)")
+        createFacts(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    private fun createFacts(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS facts(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, " +
+                "a TEXT NOT NULL, b TEXT NOT NULL, at INTEGER NOT NULL)"
+        )
+    }
+
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) createFacts(db)
+    }
+
+    fun addFact(kind: String, a: String, b: String): Long {
+        val v = ContentValues()
+        v.put("kind", kind)
+        v.put("a", a)
+        v.put("b", b)
+        v.put("at", System.currentTimeMillis())
+        return writableDatabase.insert("facts", null, v)
+    }
+
+    fun facts(kind: String): List<Fact> {
+        val out = ArrayList<Fact>()
+        val c = readableDatabase.rawQuery("SELECT id,kind,a,b,at FROM facts WHERE kind=? ORDER BY id", arrayOf(kind))
+        try {
+            while (c.moveToNext()) out.add(Fact(c.getLong(0), c.getString(1), c.getString(2), c.getString(3), c.getLong(4)))
+        } finally {
+            c.close()
+        }
+        return out
+    }
+
+    fun deleteFact(id: Long) {
+        writableDatabase.delete("facts", "id=?", arrayOf(id.toString()))
+    }
 
     private fun lng(c: Cursor, i: Int): Long? = if (c.isNull(i)) null else c.getLong(i)
 

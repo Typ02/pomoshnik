@@ -49,6 +49,7 @@ class MainActivity : Activity() {
         }
     private var busy = false
     private var importing: String? = null
+    private var answering = -1
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
 
@@ -114,6 +115,7 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
         Scheduler.rescheduleAll(this)
+        Brain.scheduleDaily(this)
     }
 
     override fun onResume() {
@@ -186,7 +188,7 @@ class MainActivity : Activity() {
 
     private fun renderTasks() {
         val now = System.currentTimeMillis()
-        input.hint = if (Me.known(this)) "Напишіть справу: «завтра о 8 подзвонити мамі»" else "Ваша відповідь…"
+        input.hint = if (Me.known(this) && answering < 0) "Справа, питання або «запам'ятай, що…»" else "Ваша відповідь…"
         text(Me.greeting(this, now), 17f, true)
         if (busy) text("Думаю…")
         val r = reply
@@ -195,6 +197,24 @@ class MainActivity : Activity() {
             val q = Me.question(this)
             val acts = q.options.map { o -> Act(o) { answer(o) } }
             card("🙂 " + q.text, *acts.toTypedArray(), Act("Пропустити") { answer("Пропустити") })
+        } else {
+            val qi = Brain.nextQuestion(this, now)
+            if (answering >= 0) {
+                card(
+                    "✍️ " + Brain.QUESTIONS[answering].second + "\n\nНапишіть або надиктуйте відповідь унизу.",
+                    Act("Скасувати") { answering = -1; render() }
+                )
+            } else if (qi != null) {
+                card(
+                    "❓ Хочу знати вас краще. " + Brain.QUESTIONS[qi].second,
+                    Act("Не питай про це") { Brain.skipForever(this, qi); render() },
+                    Act("Не зараз") { Brain.skipToday(this, now); render() },
+                    Act("Відповісти") { answering = qi; input.requestFocus(); render() },
+                )
+            }
+            for (n in Brain.notes(this)) {
+                card("👀 Я помітив: " + n.text, Act("Зрозуміло") { Learner.dismiss(this, n.id); render() })
+            }
         }
 
         for (s in Learner.suggestions(this)) {
@@ -340,7 +360,27 @@ class MainActivity : Activity() {
             say(null)
             render()
         }
-        text("Що я про вас дізнався", 17f, true)
+        text("Що я пам'ятаю", 17f, true)
+        val facts = Db.get(this).facts("fact")
+        val rules = Db.get(this).facts("rule")
+        if (facts.isEmpty() && rules.isEmpty()) {
+            text(
+                "Поки нічого. Навчайте мене:\n" +
+                    "• «запам'ятай, що показники лічильника 4512»\n" +
+                    "• «у мене авто Шкода»\n" +
+                    "• «коли кажу зал — це тренування о 19:00»\n" +
+                    "• «вранці — це о 6»\n" +
+                    "А потім питайте: «які показники лічильника?»"
+            )
+        }
+        for (r in rules) {
+            card("«" + r.a + "» → «" + r.b + "»", Act("Забути") { Db.get(this).deleteFact(r.id); render() })
+        }
+        for (x in facts.takeLast(40).reversed()) {
+            card(x.a, Act("Забути") { Db.get(this).deleteFact(x.id); render() })
+        }
+
+        text("Що я помітив за вашими діями", 17f, true)
         text(Learner.insights(this))
 
         val auto = CheckBox(this)
@@ -491,7 +531,39 @@ class MainActivity : Activity() {
             answer(s)
             return
         }
-        if (isQuestion(s)) ask(s) else addFromText(s)
+        val now = System.currentTimeMillis()
+        if (answering >= 0) {
+            val qi = answering
+            answering = -1
+            Brain.answerQuestion(this, qi, s)
+            Brain.skipToday(this, now)
+            if (!TimeParser.parse(s, now, Me.cfg(this)).empty) {
+                say("Дякую, запам'ятав. Зробити з цього нагадування?", listOf(Act("Так") { addFromText(s) }))
+            } else {
+                say("Дякую, запам'ятав! Це можна побачити й виправити у вкладці «Звички».")
+            }
+            render()
+            return
+        }
+        val taught = Brain.teach(this, s)
+        if (taught != null) {
+            say(taught)
+            render()
+            return
+        }
+        val s2 = Brain.applyRules(this, s)
+        if (isQuestion(s2)) {
+            ask(s2)
+        } else if (Brain.aboutMe(s2) && TimeParser.parse(s2, now, Me.cfg(this)).empty) {
+            val id = Db.get(this).addFact("fact", s2.replaceFirstChar { it.uppercase() }, "")
+            say("Запам'ятав про вас: «$s2».", listOf(Act("Ні, це справа") {
+                Db.get(this).deleteFact(id)
+                addFromText(s2)
+            }))
+            render()
+        } else {
+            addFromText(s2)
+        }
     }
 
     private fun addFromText(s: String) {
@@ -527,30 +599,48 @@ class MainActivity : Activity() {
         createTask(p, now)
     }
 
+    private fun nextAt(minute: Int, now: Long): Long {
+        var d = Recur.setTime(now, minute)
+        if (d <= now) {
+            val c = Recur.cal(d)
+            c.add(Calendar.DAY_OF_YEAR, 1)
+            d = c.timeInMillis
+        }
+        return d
+    }
+
     private fun createTask(p: ParseResult, now: Long) {
         val habit = Learner.usual(this, Learner.keyOf(p.title))
+        val learned = Brain.learnedTime(this, p.title)
         var note = ""
         var due: Long?
+        var askTime = false
         if (p.empty) {
-            if (habit != null) {
+            if (learned >= 0) {
+                due = nextAt(learned, now)
+                note = "\nЧас не вказано — поставив на " + Fmt.hm(learned) + ", як ви виправили минулого разу."
+            } else if (habit != null) {
                 due = Learner.nextByHabit(habit, now)
                 note = "\nЧас не вказано — поставив як зазвичай: ви робите це " + Learner.habitText(habit) + "."
             } else {
                 due = null
+                askTime = true
             }
         } else {
             val best = Learner.bestHour(this)
-            val def = habit?.minute ?: if (best != null) best * 60 else (Me.wake(this) + 60).coerceAtMost(1435)
+            val def = if (learned >= 0) learned else habit?.minute
+                ?: if (best != null) best * 60 else (Me.wake(this) + 60).coerceAtMost(1435)
             due = TimeParser.build(p, now, def)
             if (!p.hasTime) {
                 if (due != null && due < now && p.repeat == "none") due = now + 3_600_000L
-                note = if (habit != null) "\nЧас узяв із вашої звички."
-                else "\nЧас не вказано — поставив сам; натисніть на справу, щоб змінити."
+                note = if (learned >= 0) "\nЧас узяв той, на який ви виправляли минулого разу."
+                else if (habit != null) "\nЧас узяв із вашої звички."
+                else "\nЧас не вказано — поставив сам."
             }
         }
         val t = Task(title = p.title, dueAt = due, repeat = if (due == null) "none" else p.repeat, days = p.days)
         Logic.add(this, t)
-        if (p.empty && habit == null) {
+        if (askTime) {
             askWhen(t)
             render()
             return
@@ -559,13 +649,15 @@ class MainActivity : Activity() {
         if (due != null) sb.append(" — ").append(Fmt.whenText(due, now)) else sb.append(" — без терміну")
         if (t.repeat != "none") sb.append(", ").append(Recur.label(t.repeat, t.days, due))
         sb.append(".").append(note)
-        reply = sb.toString()
+        say(sb.toString(), listOf(Act("Виправити") { editDialog(t) }))
         render()
     }
 
     private fun ask(q: String) {
+        val known = Brain.recall(this, q)
         if (!Llm.installed(this)) {
-            reply = Learner.simpleAnswer(this, q)
+            reply = if (known.isNotEmpty()) "Ось що я пам'ятаю:\n" + known.joinToString("\n") { "• " + it.a }
+            else Learner.simpleAnswer(this, q)
             render()
             return
         }
@@ -582,7 +674,10 @@ class MainActivity : Activity() {
             if (t.repeat != "none") sb.append(", ").append(Recur.label(t.repeat, t.days, due))
             sb.append("\n")
         }
-        sb.append("\nПро користувача: ").append(Me.summary(this)).append("\n\nСпостереження про звички:\n").append(Learner.insights(this).take(900))
+        sb.append("\nПро користувача: ").append(Me.summary(this))
+        val allFacts = (known + Db.get(this).facts("fact").takeLast(20)).distinctBy { it.id }
+        if (allFacts.isNotEmpty()) sb.append("\nФакти, які користувач розповів: ").append(allFacts.joinToString("; ") { it.a })
+        sb.append("\n\nСпостереження про звички:\n").append(Learner.insights(this).take(900))
         sb.append("\n\nПитання: ").append(q)
         busy = true
         render()
@@ -668,6 +763,7 @@ class MainActivity : Activity() {
                 if (d != t.dueAt) {
                     t.firedAt = null
                     t.snoozedUntil = null
+                    if (d != null) Brain.learnTime(this, t.title, Recur.minuteOfDay(d))
                 }
                 t.dueAt = if (d != null && t.repeat != "none" && d < System.currentTimeMillis()) {
                     Recur.align(d, t.repeat, t.days, System.currentTimeMillis())

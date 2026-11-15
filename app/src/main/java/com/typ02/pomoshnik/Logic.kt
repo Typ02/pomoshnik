@@ -251,5 +251,6 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         Scheduler.ensureChannel(ctx)
         Scheduler.rescheduleAll(ctx)
+        Brain.scheduleDaily(ctx)
     }
 }

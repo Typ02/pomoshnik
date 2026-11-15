@@ -160,14 +160,17 @@ object Me {
         var evening = if (works) maxOf(we + 60, 18 * 60) else 19 * 60
         evening = minOf(evening, sAdj - 90).coerceIn(15 * 60, 23 * 60)
         val night = minOf(22 * 60, sAdj - 30).coerceAtLeast(evening + 30)
+        val pr = p(ctx)
+        // те, чого користувач навчив сам («вранці — це о 6»), важливіше за розрахунок
+        fun ov(k: String, d: Int): Int = pr.getInt("ov_$k", d).coerceIn(0, 1435)
         return TimeCfg(
-            morning = r5(w + 30).coerceAtMost(1435),
-            day = 13 * 60,
-            evening = r5(evening),
-            night = r5(night).coerceAtMost(1435),
-            afterWork = if (works) r5(we + 30).coerceAtMost(1435) else r5(evening),
-            beforeWork = if (works) r5(maxOf(ws - 60, w + 15)).coerceAtMost(1435) else r5(w + 30),
-            beforeSleep = r5((sAdj - 30) % 1440),
+            morning = ov("morning", r5(w + 30).coerceAtMost(1435)),
+            day = ov("day", 13 * 60),
+            evening = ov("evening", r5(evening)),
+            night = ov("night", r5(night).coerceAtMost(1435)),
+            afterWork = ov("afterWork", if (works) r5(we + 30).coerceAtMost(1435) else r5(evening)),
+            beforeWork = ov("beforeWork", if (works) r5(maxOf(ws - 60, w + 15)).coerceAtMost(1435) else r5(w + 30)),
+            beforeSleep = ov("beforeSleep", r5((sAdj - 30) % 1440)),
             wakeUp = r5(w + 15).coerceAtMost(1435),
             workMask = if (works) workMask(ctx) else 31,
         )
