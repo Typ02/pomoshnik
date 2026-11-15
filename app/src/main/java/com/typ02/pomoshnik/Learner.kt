@@ -147,6 +147,7 @@ object Learner {
         val active = db.active()
         val skip = dismissed(ctx)
         val out = ArrayList<Suggestion>()
+        for (s in Me.starters(ctx)) if (s.id !in skip) out.add(s)
 
         // 1. Напоминание стоит не на то время
         for (t in active) {

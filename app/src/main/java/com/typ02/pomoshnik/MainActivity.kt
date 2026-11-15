@@ -41,7 +41,12 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
 
     private var tab = 0
+    private var replyActs: List<Act> = emptyList()
     private var reply: String? = null
+        set(v) {
+            field = v
+            replyActs = emptyList()
+        }
     private var busy = false
     private var importing: String? = null
 
@@ -151,16 +156,19 @@ class MainActivity : Activity() {
         tv.text = s
         tv.textSize = 15f
         c.addView(tv)
-        val row = LinearLayout(this)
-        row.orientation = LinearLayout.HORIZONTAL
-        row.gravity = Gravity.END
-        for (a in acts) {
-            val b = Button(this)
-            b.text = a.label
-            b.setOnClickListener { a.run() }
-            row.addView(b)
+        for (chunk in acts.toList().chunked(3)) {
+            val row = LinearLayout(this)
+            row.orientation = LinearLayout.HORIZONTAL
+            row.gravity = Gravity.END
+            for (a in chunk) {
+                val b = Button(this)
+                b.text = a.label
+                b.isAllCaps = false
+                b.setOnClickListener { a.run() }
+                row.addView(b)
+            }
+            c.addView(row)
         }
-        c.addView(row)
         val lp = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         )
@@ -178,9 +186,16 @@ class MainActivity : Activity() {
 
     private fun renderTasks() {
         val now = System.currentTimeMillis()
+        input.hint = if (Me.known(this)) "Напишіть справу: «завтра о 8 подзвонити мамі»" else "Ваша відповідь…"
+        text(Me.greeting(this, now), 17f, true)
         if (busy) text("Думаю…")
         val r = reply
-        if (r != null) card(r, Act("Сховати") { reply = null; render() })
+        if (r != null) card(r, *replyActs.toTypedArray(), Act("Сховати") { reply = null; render() })
+        if (!Me.known(this)) {
+            val q = Me.question(this)
+            val acts = q.options.map { o -> Act(o) { answer(o) } }
+            card("🙂 " + q.text, *acts.toTypedArray(), Act("Пропустити") { answer("Пропустити") })
+        }
 
         for (s in Learner.suggestions(this)) {
             card(
@@ -271,7 +286,60 @@ class MainActivity : Activity() {
         content.addView(row, lp)
     }
 
+    private fun say(s: String?, acts: List<Act> = emptyList()) {
+        reply = s
+        replyActs = acts
+    }
+
+    private fun answer(s: String) {
+        val err = Me.answer(this, s)
+        if (err != null) {
+            say(err)
+        } else if (Me.known(this)) {
+            say("Дякую! Ось що я запам'ятав.\n\n" + Me.summary(this) + "\n\nТепер пишіть або диктуйте справи — далі я вчитимусь із того, як ви їх виконуєте.")
+        } else {
+            say(null)
+        }
+        render()
+    }
+
+    private fun askWhen(t: Task) {
+        val c = Me.cfg(this)
+        val opts = ArrayList<Pair<String, Int>>()
+        opts.add("Вранці" to c.morning)
+        if (Me.works(this) && Me.workMask(this) != 0) opts.add("Після роботи" to c.afterWork)
+        opts.add("Увечері" to c.evening)
+        val acts = ArrayList<Act>()
+        for ((label, minute) in opts) {
+            acts.add(Act(label) {
+                val n = System.currentTimeMillis()
+                var d = Recur.setTime(n, minute)
+                if (d <= n) {
+                    val cal = Recur.cal(d)
+                    cal.add(Calendar.DAY_OF_YEAR, 1)
+                    d = cal.timeInMillis
+                }
+                t.dueAt = d
+                Logic.update(this, t)
+                say("Гаразд, нагадаю «" + t.title + "» — " + Fmt.whenText(d, n) + ".")
+                render()
+            })
+        }
+        say("Додав: «" + t.title + "» — без терміну.\nКоли нагадати?", acts)
+    }
+
     private fun renderHabits() {
+        text("Про вас", 17f, true)
+        text(
+            if (Me.known(this)) Me.summary(this)
+            else "Ми ще не познайомились — дайте відповідь на мої питання у вкладці «Справи»."
+        )
+        button("Розпитати мене заново") {
+            Me.reset(this)
+            tab = 0
+            say(null)
+            render()
+        }
         text("Що я про вас дізнався", 17f, true)
         text(Learner.insights(this))
 
@@ -419,12 +487,16 @@ class MainActivity : Activity() {
         if (s.isEmpty() || busy) return
         input.setText("")
         tab = 0
+        if (!Me.known(this)) {
+            answer(s)
+            return
+        }
         if (isQuestion(s)) ask(s) else addFromText(s)
     }
 
     private fun addFromText(s: String) {
         val now = System.currentTimeMillis()
-        val p = TimeParser.parse(s, now)
+        val p = TimeParser.parse(s, now, Me.cfg(this))
         if (p.empty && Llm.installed(this) && looksTimed(s)) {
             busy = true
             render()
@@ -440,7 +512,7 @@ class MainActivity : Activity() {
                     val what = Regex("СПРАВА\\s*:\\s*(.+)").find(out)?.groupValues?.get(1)?.trim()
                     val whenS = Regex("КОЛИ\\s*:\\s*(.+)").find(out)?.groupValues?.get(1)?.trim(' ', '«', '»', '"', '.')
                     if (!whenS.isNullOrEmpty() && whenS.lowercase() != "ні" && !whenS.lowercase().startsWith("нема")) {
-                        val p2 = TimeParser.parse(whenS, now)
+                        val p2 = TimeParser.parse(whenS, now, Me.cfg(this))
                         if (!p2.empty) {
                             val title = if (what.isNullOrEmpty()) "" else TimeParser.cleanTitle(what.trim('«', '»', '"'))
                             p2.title = if (title.isEmpty()) p.title else title
@@ -468,7 +540,7 @@ class MainActivity : Activity() {
             }
         } else {
             val best = Learner.bestHour(this)
-            val def = habit?.minute ?: if (best != null) best * 60 else 9 * 60
+            val def = habit?.minute ?: if (best != null) best * 60 else (Me.wake(this) + 60).coerceAtMost(1435)
             due = TimeParser.build(p, now, def)
             if (!p.hasTime) {
                 if (due != null && due < now && p.repeat == "none") due = now + 3_600_000L
@@ -478,6 +550,11 @@ class MainActivity : Activity() {
         }
         val t = Task(title = p.title, dueAt = due, repeat = if (due == null) "none" else p.repeat, days = p.days)
         Logic.add(this, t)
+        if (p.empty && habit == null) {
+            askWhen(t)
+            render()
+            return
+        }
         val sb = StringBuilder("Додав: «" + t.title + "»")
         if (due != null) sb.append(" — ").append(Fmt.whenText(due, now)) else sb.append(" — без терміну")
         if (t.repeat != "none") sb.append(", ").append(Recur.label(t.repeat, t.days, due))
@@ -505,7 +582,7 @@ class MainActivity : Activity() {
             if (t.repeat != "none") sb.append(", ").append(Recur.label(t.repeat, t.days, due))
             sb.append("\n")
         }
-        sb.append("\nСпостереження про звички:\n").append(Learner.insights(this).take(900))
+        sb.append("\nПро користувача: ").append(Me.summary(this)).append("\n\nСпостереження про звички:\n").append(Learner.insights(this).take(900))
         sb.append("\n\nПитання: ").append(q)
         busy = true
         render()

@@ -30,16 +30,19 @@ object Logic {
     }
 
     fun update(ctx: Context, t: Task) {
+        Me.clearNag(ctx, t.id)
         Db.get(ctx).save(t)
         Scheduler.schedule(ctx, t)
     }
 
     fun delete(ctx: Context, t: Task) {
+        Me.clearNag(ctx, t.id)
         Scheduler.cancel(ctx, t.id)
         Db.get(ctx).delete(t.id)
     }
 
     fun complete(ctx: Context, t: Task) {
+        Me.clearNag(ctx, t.id)
         val now = System.currentTimeMillis()
         log(ctx, t, "done", t.firedAt ?: 0L)
         if (t.repeat != "none" && t.dueAt != null) {
@@ -57,6 +60,7 @@ object Logic {
     }
 
     fun snooze(ctx: Context, t: Task, minutes: Int) {
+        Me.clearNag(ctx, t.id)
         t.snoozedUntil = System.currentTimeMillis() + minutes * 60_000L
         Db.get(ctx).save(t)
         log(ctx, t, "snooze", minutes.toLong())
@@ -97,10 +101,17 @@ object Scheduler {
             val fired = t.firedAt
             if (fired == null || fired < at) {
                 at = now + 2000 // ещё не напоминали (например, телефон был выключен)
-            } else if (t.repeat != "none") {
-                at = Recur.next(t, now) // не отметили — напомним в следующий раз по расписанию
             } else {
-                return
+                // не отметили: повторное напоминание (если включено) или следующий раз по расписанию
+                val nagMin = Me.nag(ctx)
+                val nagAt = if (nagMin > 0 && Me.nagN(ctx, t.id) < Me.MAX_NAGS) {
+                    Me.quietShift(ctx, maxOf(fired, Me.nagAt(ctx, t.id)) + nagMin * 60_000L)
+                } else {
+                    null
+                }
+                val nextOcc = if (t.repeat != "none") Recur.next(t, now) else null
+                at = listOfNotNull(nagAt, nextOcc).minOrNull() ?: return
+                if (at <= now) at = now + 2000
             }
         }
         val exact = Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms()
@@ -201,16 +212,21 @@ class AlarmReceiver : BroadcastReceiver() {
         val due = t.dueAt
         val fired = t.firedAt
         // повторяющуюся задачу не отметили — прошлый раз считаем пропущенным
-        if (t.repeat != "none" && due != null && fired != null && fired >= due &&
-            t.snoozedUntil == null && due < now - 60_000L
-        ) {
+        var nag = due != null && fired != null && fired >= due && t.snoozedUntil == null
+        if (nag && due != null && t.repeat != "none" && now >= Recur.next(t, due + 60_000L) - 60_000L) {
             Logic.log(ctx, t, "missed")
             t.dueAt = Recur.align(due, t.repeat, t.days, now - 12 * 3_600_000L)
+            nag = false
         }
-        t.firedAt = now
-        t.snoozedUntil = null
-        db.save(t)
-        Logic.log(ctx, t, "fired")
+        if (nag) {
+            Me.bumpNag(ctx, t.id, now) // повторное напоминание о том же
+        } else {
+            Me.clearNag(ctx, t.id)
+            t.firedAt = now
+            t.snoozedUntil = null
+            db.save(t)
+            Logic.log(ctx, t, "fired")
+        }
         Scheduler.notify(ctx, t)
         Scheduler.schedule(ctx, t)
     }

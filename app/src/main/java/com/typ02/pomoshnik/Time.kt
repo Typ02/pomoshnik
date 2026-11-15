@@ -160,8 +160,8 @@ object TimeParser {
     private val REPEATS = listOf(
         "daily" to "каждый\\s+день|каждое\\s+утро|каждый\\s+вечер|ежедневно|щодня|щоранку|" +
             "щовечора|кожного\\s+дня|кожен\\s+день|кожного\\s+ранку|кожного\\s+вечора",
-        "weekdays" to "по\\s+будням|в\\s+будни|по\\s+будн[яі]х|[ув]\\s+будні|по\\s+рабочим\\s+дням|" +
-            "в\\s+рабочие\\s+дни|по\\s+робочих\\s+днях|у\\s+робочі\\s+дні",
+        "workdays" to "по\\s+рабочим\\s+дням|в\\s+рабочие\\s+дни|по\\s+робочих\\s+днях|[ув]\\s+робочі\\s+дні",
+        "weekdays" to "по\\s+будням|в\\s+будни|по\\s+будн[яі]х|[ув]\\s+будні",
         "weekends" to "по\\s+выходным|в\\s+выходные|на\\s+вихідних|по\\s+вихідних|[ув]\\s+вихідні",
         "weekly" to "каждую\\s+неделю|еженедельно|щотижня|кожного\\s+тижня|кожен\\s+тиждень|" +
             "раз\\s+в\\s+неделю|раз\\s+на\\s+тиждень",
@@ -169,12 +169,17 @@ object TimeParser {
             "раз\\s+в\\s+месяц|раз\\s+на\\s+місяць",
     )
 
-    private val PERIODS = listOf(
-        8 to "утром|с\\s+утра|зранку|вранці|уранці",
-        12 to "в\\s+полдень|опівдні|в\\s+обед|в\\s+обід",
-        13 to "днем|вдень|удень",
-        19 to "вечером|ввечері|увечері",
-        22 to "ночью|вночі|уночі",
+    private fun periods(cfg: TimeCfg) = listOf(
+        cfg.afterWork to "после\\s+работы|після\\s+роботи",
+        cfg.beforeWork to "перед\\s+работой|до\\s+работы|перед\\s+роботою|до\\s+роботи",
+        cfg.beforeSleep to "перед\\s+сном",
+        cfg.wakeUp to "как\\s+проснусь|як\\s+прокинусь|після\\s+сну|после\\s+сна",
+        cfg.morning to "утром|с\\s+утра|зранку|вранці|уранці",
+        720 to "в\\s+полдень|опівдні",
+        780 to "в\\s+обед|в\\s+обід|на\\s+обід",
+        cfg.day to "днем|вдень|удень",
+        cfg.evening to "вечером|ввечері|увечері",
+        cfg.night to "ночью|вночі|уночі",
     )
 
     private val EDGE_WORDS = setOf(
@@ -192,7 +197,7 @@ object TimeParser {
     private fun monthIndex(word: String): Int =
         MONTHS.indexOfFirst { stems -> stems.any { word.startsWith(it) } }
 
-    fun parse(input: String, now: Long): ParseResult {
+    fun parse(input: String, now: Long, cfg: TimeCfg = TimeCfg()): ParseResult {
         val s = input.lowercase().replace('ё', 'е')
         val used = BooleanArray(s.length)
 
@@ -244,9 +249,17 @@ object TimeParser {
             repeat = kind
             take(m.range)
             val v = m.value
-            if (v.contains("утр") || v.contains("ранк")) period = 8
-            if (v.contains("вечер") || v.contains("вечор")) period = 19
+            if (v.contains("утр") || v.contains("ранк")) period = cfg.morning
+            if (v.contains("вечер") || v.contains("вечор")) period = cfg.evening
             break
+        }
+        if (repeat == "workdays") {
+            if (cfg.workMask != 0 && cfg.workMask != 31) {
+                repeat = "days"
+                days = cfg.workMask
+            } else {
+                repeat = "weekdays"
+            }
         }
 
         // дни недели
@@ -388,7 +401,7 @@ object TimeParser {
         }
 
         // «утром», «вечером», «вдень»
-        for ((h, pat) in PERIODS) {
+        for ((h, pat) in periods(cfg)) {
             val m = find("$B(?:$pat)(?!$L)").firstOrNull() ?: continue
             period = h
             take(m.range)
@@ -396,11 +409,11 @@ object TimeParser {
         }
         val hr = hour
         val per = period
-        if (hr != null && per != null && hr < 12 && per >= 13) {
+        if (hr != null && per != null && hr < 12 && per >= 13 * 60) {
             hour = hr + 12
         } else if (hr == null && per != null) {
-            hour = per
-            minute = 0
+            hour = per / 60
+            minute = per % 60
         }
 
         // название = всё, что осталось
